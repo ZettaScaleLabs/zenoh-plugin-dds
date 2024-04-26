@@ -33,9 +33,8 @@ use std::time::Duration;
 use tracing::{debug, error, info, trace, warn};
 use zenoh::liveliness::LivelinessToken;
 use zenoh::plugins::{RunningPlugin, RunningPluginTrait, ZenohPlugin};
-use zenoh::prelude::r#async::AsyncResolve;
-use zenoh::prelude::r#sync::SyncResolve;
-use zenoh::prelude::*;
+use zenoh::prelude::r#async::*;
+use zenoh::prelude::sync::*;
 use zenoh::publication::CongestionControl;
 use zenoh::query::{ConsolidationMode, QueryTarget};
 use zenoh::queryable::{Query, Queryable};
@@ -70,7 +69,7 @@ macro_rules! ke_for_sure {
 
 macro_rules! member_id {
     ($val:expr) => {
-        $val.key_expr.as_str().split('/').last().unwrap()
+        $val.key_expr().as_str().split('/').last().unwrap()
     };
 }
 
@@ -159,7 +158,6 @@ pub async fn run(runtime: Runtime, config: Config) {
     let zsession = match zenoh::init(runtime)
         .aggregated_subscribers(config.generalise_subs.clone())
         .aggregated_publishers(config.generalise_pubs.clone())
-        .res_async()
         .await
     {
         Ok(session) => Arc::new(session),
@@ -177,7 +175,6 @@ pub async fn run(runtime: Runtime, config: Config) {
     let member = match zsession
         .liveliness()
         .declare_token(*KE_PREFIX_LIVELINESS_GROUP / &member_id)
-        .res_async()
         .await
     {
         Ok(member) => member,
@@ -628,7 +625,7 @@ impl<'a> DdsPluginRuntime<'a> {
 
         // get the list of sub-key expressions that will match the same stored keys than
         // the selector, if those keys had the admin_keyexpr_prefix.
-        let sub_kes = selector.key_expr.strip_prefix(admin_keyexpr_prefix);
+        let sub_kes = selector.key_expr().strip_prefix(admin_keyexpr_prefix);
         if sub_kes.is_empty() {
             error!("Received query for admin space: '{}' - but it's not prefixed by admin_keyexpr_prefix='{}'", selector, admin_keyexpr_prefix);
             return;
@@ -668,8 +665,7 @@ impl<'a> DdsPluginRuntime<'a> {
         for (ke, v) in kvs.drain(..) {
             let admin_keyexpr = admin_keyexpr_prefix / &ke;
             if let Err(e) = query
-                .reply(Ok(Sample::new(admin_keyexpr, v)))
-                .res_async()
+                .reply(admin_keyexpr, Payload::try_from(v).unwrap())
                 .await
             {
                 warn!("Error replying to admin query {:?}: {}", query, e);
@@ -684,7 +680,6 @@ impl<'a> DdsPluginRuntime<'a> {
             .declare_subscriber(*KE_PREFIX_LIVELINESS_GROUP / *KE_ANY_N_SEGMENT)
             .querying()
             .with(flume::unbounded())
-            .res_async()
             .await
             .expect("Failed to create Liveliness Subscriber");
 
@@ -700,7 +695,6 @@ impl<'a> DdsPluginRuntime<'a> {
         let admin_queryable = self
             .zsession
             .declare_queryable(admin_keyexpr_expr)
-            .res_async()
             .await
             .expect("Failed to create AdminSpace queryable");
 
@@ -908,7 +902,7 @@ impl<'a> DdsPluginRuntime<'a> {
                 },
 
                 group_event = group_subscriber.recv_async() => {
-                    match group_event.as_ref().map(|s|s.kind) {
+                    match group_event.as_ref().map(|s|s.kind()) {
                         Ok(SampleKind::Put) => {
                             let mid = member_id!(group_event.as_ref().unwrap());
                             debug!("New zenoh_dds_plugin detected: {}", mid);
@@ -972,19 +966,16 @@ impl<'a> DdsPluginRuntime<'a> {
         let fwd_writers_key_prefix_key = self
             .zsession
             .declare_keyexpr(fwd_writers_key_prefix)
-            .res_async()
             .await
             .expect("Failed to declare key expression for Fwd Discovery of writers");
         let fwd_readers_key_prefix_key = self
             .zsession
             .declare_keyexpr(fwd_readers_key_prefix)
-            .res_async()
             .await
             .expect("Failed to declare key expression for Fwd Discovery of readers");
         let fwd_ros_discovery_key_declared = self
             .zsession
             .declare_keyexpr(&fwd_ros_discovery_key)
-            .res_async()
             .await
             .expect("Failed to declare key expression for Fwd Discovery of ros_discovery");
 
@@ -993,7 +984,6 @@ impl<'a> DdsPluginRuntime<'a> {
             .zsession
             .declare_publication_cache(fwd_declare_publication_cache_key)
             .queryable_allowed_origin(Locality::Remote) // Note: don't reply to queries from local QueryingSubscribers
-            .res_async()
             .await
             .expect("Failed to declare PublicationCache for Fwd Discovery");
 
@@ -1004,7 +994,6 @@ impl<'a> DdsPluginRuntime<'a> {
             .querying()
             .allowed_origin(Locality::Remote) // Note: ignore my own publications
             .query_timeout(self.config.queries_timeout)
-            .res_async()
             .await
             .expect("Failed to declare QueryingSubscriber for Fwd Discovery");
 
@@ -1041,7 +1030,7 @@ impl<'a> DdsPluginRuntime<'a> {
                                 Ok(s) => s,
                                 Err(e) => { error!("INTERNAL ERROR: failed to serialize discovery message for {:?}: {}", entity, e); continue; }
                             };
-                            if let Err(e) = self.zsession.put(&fwd_ke, ser_msg).congestion_control(CongestionControl::Block).res_async().await {
+                            if let Err(e) = self.zsession.put(&fwd_ke, ser_msg).congestion_control(CongestionControl::Block).await {
                                 error!("INTERNAL ERROR: failed to publish discovery message on {}: {}", fwd_ke, e);
                             }
 
@@ -1056,7 +1045,7 @@ impl<'a> DdsPluginRuntime<'a> {
                             if let Some((admin_keyexpr, _)) = self.remove_dds_writer(&key) {
                                 let fwd_ke = &fwd_writers_key_prefix_key / &admin_keyexpr;
                                 // publish its deletion from admin space
-                                if let Err(e) = self.zsession.delete(&fwd_ke).congestion_control(CongestionControl::Block).res_async().await {
+                                if let Err(e) = self.zsession.delete(&fwd_ke).congestion_control(CongestionControl::Block).await {
                                     error!("INTERNAL ERROR: failed to publish undiscovery message on {:?}: {}", fwd_ke, e);
                                 }
                             }
@@ -1101,7 +1090,7 @@ impl<'a> DdsPluginRuntime<'a> {
                                 Ok(s) => s,
                                 Err(e) => { error!("INTERNAL ERROR: failed to serialize discovery message for {:?}: {}", entity, e); continue; }
                             };
-                            if let Err(e) = self.zsession.put(&fwd_ke, ser_msg).congestion_control(CongestionControl::Block).res_async().await {
+                            if let Err(e) = self.zsession.put(&fwd_ke, ser_msg).congestion_control(CongestionControl::Block).await {
                                 error!("INTERNAL ERROR: failed to publish discovery message on {}: {}", fwd_ke, e);
                             }
 
@@ -1116,7 +1105,7 @@ impl<'a> DdsPluginRuntime<'a> {
                             if let Some((admin_keyexpr, _)) = self.remove_dds_reader(&key) {
                                 let fwd_ke = &fwd_readers_key_prefix_key / &admin_keyexpr;
                                 // publish its deletion from admin space
-                                if let Err(e) = self.zsession.delete(&fwd_ke).congestion_control(CongestionControl::Block).res_async().await {
+                                if let Err(e) = self.zsession.delete(&fwd_ke).congestion_control(CongestionControl::Block).await {
                                     error!("INTERNAL ERROR: failed to publish undiscovery message on {:?}: {}", fwd_ke, e);
                                 }
                             }
@@ -1162,7 +1151,7 @@ impl<'a> DdsPluginRuntime<'a> {
 
                 sample = fwd_disco_sub.recv_async() => {
                     let sample = sample.expect("Fwd Discovery subscriber was closed!");
-                    let fwd_ke = &sample.key_expr;
+                    let fwd_ke = &sample.key_expr();
                     debug!("Received forwarded discovery message on {}", fwd_ke);
 
                     // parse fwd_ke and extract the remote uuid, the discovery kind (reader|writer|ros_disco) and the remaining of the keyexpr
@@ -1172,9 +1161,9 @@ impl<'a> DdsPluginRuntime<'a> {
                             "writer" => {
                                 // reconstruct full admin keyexpr for this entity (i.e. with it's remote plugin's uuid)
                                 let full_admin_keyexpr = *KE_PREFIX_ADMIN_SPACE / remote_uuid / ke_for_sure!("dds") / remaining_ke;
-                                if sample.kind != SampleKind::Delete {
+                                if sample.kind() != SampleKind::Delete {
                                     // deserialize payload
-                                    let (entity, scope) = match bincode::deserialize::<(DdsEntity, Option<OwnedKeyExpr>)>(&sample.payload.contiguous()) {
+                                    let (entity, scope) = match bincode::deserialize::<(DdsEntity, Option<OwnedKeyExpr>)>(&sample.payload().deserialize::<Vec<u8>>().unwrap()) {
                                         Ok(x) => x,
                                         Err(e) => {
                                             warn!("Failed to deserialize discovery msg for {}: {}", full_admin_keyexpr, e);
@@ -1252,9 +1241,9 @@ impl<'a> DdsPluginRuntime<'a> {
                             "reader" => {
                                 // reconstruct full admin keyexpr for this entity (i.e. with it's remote plugin's uuid)
                                 let full_admin_keyexpr = *KE_PREFIX_ADMIN_SPACE / remote_uuid / ke_for_sure!("dds") / remaining_ke;
-                                if sample.kind != SampleKind::Delete {
+                                if sample.kind() != SampleKind::Delete {
                                     // deserialize payload
-                                    let (entity, scope) = match bincode::deserialize::<(DdsEntity, Option<OwnedKeyExpr>)>(&sample.payload.contiguous()) {
+                                    let (entity, scope) = match bincode::deserialize::<(DdsEntity, Option<OwnedKeyExpr>)>(&sample.payload().deserialize::<Vec<u8>>().unwrap()) {
                                         Ok(x) => x,
                                         Err(e) => {
                                             warn!("Failed to deserialize discovery msg for {}: {}", full_admin_keyexpr, e);
@@ -1329,7 +1318,7 @@ impl<'a> DdsPluginRuntime<'a> {
                             // it's a ros_discovery_info message
                             "ros_disco" => {
                                 match cdr::deserialize_from::<_, ParticipantEntitiesInfo, _>(
-                                    &*sample.payload.contiguous(),
+                                    &*sample.payload().deserialize::<Vec<u8>>().unwrap(),
                                     cdr::size::Infinite,
                                 ) {
                                     Ok(mut info) => {
@@ -1357,7 +1346,7 @@ impl<'a> DdsPluginRuntime<'a> {
                 },
 
                 group_event = group_subscriber.recv_async() => {
-                    match group_event.as_ref().map(|s|s.kind) {
+                    match group_event.as_ref().map(|s|s.kind()) {
                         Ok(SampleKind::Put) => {
                             let mid = member_id!(group_event.as_ref().unwrap());
                             debug!("New zenoh_dds_plugin detected: {}", mid);
@@ -1369,7 +1358,6 @@ impl<'a> DdsPluginRuntime<'a> {
                             };
                             debug!("Query past discovery messages from {} on {}", mid, key);
                             if let Err(e) = fwd_disco_sub.fetch( |cb| {
-                                use zenoh_core::SyncResolve;
                                 self.zsession.get(Selector::from(&key))
                                     .callback(cb)
                                     .target(QueryTarget::All)
@@ -1459,7 +1447,7 @@ impl<'a> DdsPluginRuntime<'a> {
                         trace!("Received ros_discovery_info from DDS for {}, forward via zenoh: {}", gid, buf.hex_encode());
                         // forward the payload on zenoh
                         let ke = &fwd_ros_discovery_key_declared / ke_for_sure!(&gid);
-                        if let Err(e) = self.zsession.put(ke, buf).res_sync() {
+                        if let Err(e) = self.zsession.put(ke, buf).wait() {
                             error!("Forward ROS discovery info failed: {}", e);
                         }
                     }

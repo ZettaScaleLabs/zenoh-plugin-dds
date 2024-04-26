@@ -29,7 +29,7 @@ use zenoh::buffers::{ZBuf, ZSlice};
 use zenoh::prelude::*;
 use zenoh::publication::CongestionControl;
 use zenoh::Session;
-use zenoh_core::SyncResolve;
+use zenoh_core::Wait;
 
 const MAX_SAMPLES: usize = 32;
 
@@ -264,7 +264,7 @@ impl fmt::Debug for DDSRawSample {
     }
 }
 
-impl From<DDSRawSample> for Value {
+impl From<DDSRawSample> for Payload {
     fn from(buf: DDSRawSample) -> Self {
         #[cfg(feature = "dds_shm")]
         {
@@ -506,7 +506,7 @@ unsafe extern "C" fn data_forwarder_listener(dr: dds_entity_t, arg: *mut std::os
                 .2
                 .put(&(*pa).1, raw_sample)
                 .congestion_control((*pa).3)
-                .res_sync();
+                .wait();
         }
         ddsi_serdata_unref(zp);
     }
@@ -603,7 +603,7 @@ pub(crate) fn create_forwarding_dds_reader(
                                 let _ = z
                                     .put(&z_key, raw_sample)
                                     .congestion_control(congestion_ctrl)
-                                    .res_sync();
+                                    .wait();
                             }
                             ddsi_serdata_unref(zp);
                         }

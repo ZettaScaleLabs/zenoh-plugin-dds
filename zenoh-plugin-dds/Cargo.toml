@@ -54,6 +54,8 @@ zenoh-core = { workspace = true }
 zenoh-ext = { workspace = true }
 zenoh-plugin-trait = { workspace = true }
 zenoh-util = { workspace = true }
+futures-util = "0.3.28"
+tokio = { version = "1.37.0", features = ["full"] }
 
 [build-dependencies]
 rustc_version = { workspace = true }
